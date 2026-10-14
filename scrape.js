@@ -89,15 +89,33 @@ function datesIn(seg) {
   while ((m = D.exec(seg))) add(m[1], m[2], m[3]);
   return out;
 }
-// 1) blocco "Info e biglietti" del testo visibile  2) dati strutturati (JSON-LD startDate / <time datetime>)  3) testo intero
-function parseDates(text, html = '') {
-  const start = text.search(/Info e biglietti|Info and tickets|Tickets? info/i);
-  if (start >= 0) { const r = datesIn(text.slice(start, start + 3000)); if (r.size) return [...r].sort(); }
+// Stage 1 (formato noto del sito, che funzionava): "dic 15 2026" nel blocco dopo "Info e biglietti".
+// ATTENZIONE: oltre il blocco la pagina contiene date di ALTRE citta'/eventi (tour, testo promozionale): non vanno mai lette.
+function parseDates(text) {
+  const start = text.search(/Info e biglietti/i);
+  const seg = text.slice(start < 0 ? 0 : start, (start < 0 ? 0 : start) + 3000);
+  const re = /(?<![A-Za-zÀ-ÿ])(gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic)\.?\s*(\d{1,2})\s*(20\d{2})(?!\d)/gi;
+  const out = new Set(); let m;
+  while ((m = re.exec(seg))) out.add(iso(m[3], MESI[m[1].toLowerCase()], +m[2]));
+  return [...out].sort();
+}
+// Stage 2 (solo per le pagine che lo stage 1 non legge): finestra STRETTA subito dopo "Info e biglietti",
+// accetta "nov 4 7 2026", "nov 4, 7 2026", "nov 4 - 7 2026", "4 nov 2026", "15/12/2026", "2026-12-15"
+function parseDatesNear(text, html = '') {
+  const start = text.search(/Info e biglietti/i);
+  if (start >= 0) {
+    const w = text.slice(start, start + 260), out = new Set(); let m;
+    const A = new RegExp(`(?<![A-Za-zÀ-ÿ])(${MN})\\.?\\s*((?:\\d{1,2}(?:\\s*[,&\\-–]\\s*|\\s+)){0,12}\\d{1,2})\\s*(20\\d{2})(?!\\d)`, 'gi');
+    while ((m = A.exec(w))) {
+      const mo = MESI_ALL[m[1].toLowerCase()], days = m[2].match(/\d{1,2}/g).map(Number);
+      days.forEach(d => { if (d >= 1 && d <= 31) out.add(iso(m[3], mo, d)); });
+    }
+    if (out.size) return [...out].sort();
+    const near = datesIn(w); if (near.size) return [...near].sort();
+  }
   const s = new Set();
-  for (const m of html.matchAll(/"(?:startDate|endDate|datePublished)"\s*:\s*"(20\d{2}-\d{2}-\d{2})/g)) if (m[1]) s.add(m[1]);
-  for (const m of html.matchAll(/<time\b[^>]*datetime\s*=\s*"(20\d{2}-\d{2}-\d{2})/gi)) s.add(m[1]);
-  if (s.size) return [...s].sort();
-  return [];
+  for (const m of html.matchAll(/"startDate"\s*:\s*"(20\d{2}-\d{2}-\d{2})/g)) s.add(m[1]);
+  return [...s].sort();
 }
 
 // Colore d'accento: conta i pixel VIVI (saturi e abbastanza luminosi), ignorando nero, bianco e grigi.
@@ -158,7 +176,7 @@ async function pool(items, n, fn) { const q = [...items]; await Promise.all(Arra
         const html = await get(url);
         const og = meta(html, 'og:image');
         const title = cleanTitle(meta(html, 'og:title') || (html.match(/<title>([^<]*)/i) || [])[1] || '');
-        let dates = parseDates(visibleText(html), html);
+        let dates = parseDates(visibleText(html));
         if (!og) { st.warnings.push('senza immagine (og:image): ' + url); return; }
         if (!dates.length) { pending.push({ url, og, title, html }); return; }
         const live = dates.filter(d => d >= from);
@@ -178,12 +196,9 @@ async function pool(items, n, fn) { const q = [...items]; await Promise.all(Arra
           const pg = await browser.newPage({ locale: 'it-IT' });
           await pg.goto(p.url, { waitUntil: 'networkidle', timeout: 60000 }); await pg.waitForTimeout(1500);
           text = (await pg.evaluate(() => document.body.innerText)).replace(/\s+/g, ' ');
-          dates = parseDates(text, await pg.content()); await pg.close();
+          dates = parseDates(text); if (!dates.length) dates = parseDatesNear(text, await pg.content()); await pg.close();
         } catch (e) { st.warnings.push(`errore browser ${p.url}: ${e.message}`); }
-        if (!dates.length) {            // ultimo tentativo: tutte le date del testo, ma solo se ce ne sono poche (evita le date di altri eventi correlati)
-          const all = [...datesIn(text || visibleText(p.html))].sort(); if (all.length && all.length <= 40) dates = all;
-        }
-        if (!dates.length) { const i = text.search(/Info e biglietti/i); st.warnings.push('senza date riconosciute: ' + p.url + ' | testo: ' + (text || visibleText(p.html)).slice(Math.max(0, i), Math.max(0, i) + 300)); continue; }
+        if (!dates.length) { const i = text.search(/Info e biglietti/i); st.warnings.push('senza date riconosciute: ' + p.url + ' | testo: ' + (text || visibleText(p.html)).slice(Math.max(0, i), Math.max(0, i) + 400)); continue; }
         const live = dates.filter(d => d >= from); if (!live.length) continue;
         const image = new URL(p.og, BASE).href.split('?')[0] + IMG_PARAMS;
         if (!(image in accents)) accents[image] = await dominantColor(image);

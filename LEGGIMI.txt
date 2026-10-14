@@ -1,0 +1,14 @@
+CAROSELLO EVENTI - INALPI ARENA (versione online su GitHub Pages)
+
+Come funziona: ogni 30 minuti GitHub legge da solo inalpiarena.it, aggiorna events.json
+e ripubblica la pagina. Nessun computer acceso, nessun server da gestire.
+
+Istruzioni complete: vedi la risposta in chat. Riassunto:
+ 1. Crea un repository PUBBLICO su github.com
+ 2. Settings > Pages > Source: "GitHub Actions"
+ 3. Carica TUTTO il contenuto di questa cartella (compresa la cartella nascosta .github)
+ 4. Tab Actions > "Aggiorna carosello" > Run workflow
+ 5. L'indirizzo finale compare in Settings > Pages
+
+Controllo:  <indirizzo>/status.json   (pagine lette, avvisi)   |   <indirizzo>/events.json
+Cambiare frequenza: modifica la riga cron in .github/workflows/update.yml

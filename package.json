@@ -1,0 +1,7 @@
+{
+  "name": "carosello-eventi",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": { "playwright": "^1.48.0" },
+  "optionalDependencies": { "sharp": "^0.33.5" }
+}

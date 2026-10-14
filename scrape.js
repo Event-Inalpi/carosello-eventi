@@ -34,7 +34,7 @@ async function fromSitemaps() {
 }
 
 async function fromListing() {
-  let chromium; try { ({ chromium } = require('playwright')); } catch { return { urls: new Set(), note: 'playwright non installato' }; }
+  let chromium; try { ({ chromium } = require('playwright')); } catch { return { urls: new Set(), cards: new Map(), note: 'playwright non installato' }; }
   const urls = new Set(); let browser;
   try {
     browser = await chromium.launch();
@@ -50,8 +50,43 @@ async function fromListing() {
       if (await more.count()) await more.first().click().catch(() => {});
       await page.waitForTimeout(1200);
     }
-    return { urls };
-  } catch (e) { return { urls, note: 'errore elenco: ' + e.message }; }
+    // legge i riquadri dell'elenco: "10 OTT -> 11 OTT" (intervallo con freccia) o "17 OTT" (giorno singolo), con l'anno dal titolo del mese
+    const raw = await page.evaluate(() => {
+      const RE = /\/eventi\/[^\/?#]+-ae\d+/, MON = ['gen','feb','mar','apr','mag','giu','lug','ago','set','ott','nov','dic'];
+      const FULL = /^(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+(20\d{2})$/i;
+      const DM = new RegExp('(\\d{1,2})\\s*(' + MON.join('|') + ')\\b', 'gi');
+      const heads = [...document.querySelectorAll('*')].filter(e => e.children.length === 0 && FULL.test((e.textContent || '').trim()));
+      const norm = h => { const m = h.match(RE); return m ? m[0] : null; };
+      const res = [], seen = new Set();
+      for (const a of document.querySelectorAll('a[href]')) {
+        const key = norm(a.href); if (!key) continue;
+        let el = a, found = null;
+        while (el && el !== document.body) {
+          const links = new Set([...el.querySelectorAll('a[href]')].map(x => norm(x.href)).filter(Boolean));
+          if (el.matches('a[href]')) links.add(key);
+          if (links.size > 1) break;
+          const txt = el.innerText || ''; DM.lastIndex = 0;
+          const ms = [...txt.matchAll(DM)];
+          if (ms.length) { found = { el, ms }; break; }
+          el = el.parentElement;
+        }
+        if (!found) continue;
+        let head = null; for (const h of heads) if (h.compareDocumentPosition(found.el) & 4) head = h;   // ultimo titolo prima del riquadro
+        const hy = head ? +head.textContent.trim().match(/(20\d{2})$/)[1] : null;
+        const id = key + '|' + found.ms.slice(0, 2).map(m => m[0]).join('>') + '|' + hy; if (seen.has(id)) continue; seen.add(id);
+        res.push({ key, hy, a: [+found.ms[0][1], MON.indexOf(found.ms[0][2].toLowerCase()) + 1], b: found.ms[1] ? [+found.ms[1][1], MON.indexOf(found.ms[1][2].toLowerCase()) + 1] : null });
+      }
+      return res;
+    });
+    const cards = new Map(); const nowY = new Date().getFullYear(), nowM = new Date().getMonth() + 1;
+    for (const r of raw) {
+      let y = r.hy; if (!y) y = r.a[1] < nowM - 1 ? nowY + 1 : nowY;
+      const start = iso(y, r.a[1], r.a[0]);
+      let end = start; if (r.b) { const y2 = r.b[1] < r.a[1] ? y + 1 : y; end = iso(y2, r.b[1], r.b[0]); if (end < start) end = start; }
+      const u = BASE + r.key; if (!cards.has(u)) cards.set(u, []); cards.get(u).push({ start, end });
+    }
+    return { urls, cards };
+  } catch (e) { return { urls, cards: new Map(), note: 'errore elenco: ' + e.message }; }
   finally { if (browser) await browser.close(); }
 }
 
@@ -158,6 +193,20 @@ async function dominantColor(url) {
   catch { return null; }
 }
 
+const expand = (a, b) => { const out = []; const d = new Date(a + 'T12:00:00Z'), e = new Date(b + 'T12:00:00Z'); for (let i = 0; d <= e && i < 120; i++, d.setUTCDate(d.getUTCDate() + 1)) out.push(d.toISOString().slice(0, 10)); return out; };
+// date finali: intervallo dell'elenco (freccia) = giorni continuativi; se la pagina elenca >=2 date singole dentro l'intervallo, valgono quelle (date non consecutive)
+function finalDates(pageDates, ranges) {
+  if (!ranges || !ranges.length) return pageDates;
+  const all = new Set();
+  for (const r of ranges) {
+    const inR = pageDates.filter(d => d >= r.start && d <= r.end);
+    if (r.start === r.end) all.add(r.start);
+    else if (inR.length >= 2) inR.forEach(d => all.add(d));
+    else expand(r.start, r.end).forEach(d => all.add(d));
+  }
+  return [...all].sort();
+}
+
 async function pool(items, n, fn) { const q = [...items]; await Promise.all(Array.from({ length: n }, async () => { while (q.length) await fn(q.shift()); })); }
 
 
@@ -166,7 +215,7 @@ async function pool(items, n, fn) { const q = [...items]; await Promise.all(Arra
   const st = { ok: false, lastRun: new Date().toISOString(), sources: {}, pages: 0, records: 0, warnings: [] };
   try {
     const [sm, li] = await Promise.all([fromSitemaps(), fromListing()]);
-    st.sources = { sitemap: sm.size, elenco: li.urls.size, ...(li.note && { nota: li.note }) };
+    st.sources = { sitemap: sm.size, elenco: li.urls.size, riquadri: li.cards.size, ...(li.note && { nota: li.note }) };
     const urls = [...new Set([...sm, ...li.urls])];
     if (!urls.length) throw new Error("Nessuna pagina evento trovata ne' da sitemap ne' da elenco " + BASE + '/eventi');
     st.pages = urls.length;
@@ -178,7 +227,9 @@ async function pool(items, n, fn) { const q = [...items]; await Promise.all(Arra
         const title = cleanTitle(meta(html, 'og:title') || (html.match(/<title>([^<]*)/i) || [])[1] || '');
         let dates = parseDates(visibleText(html));
         if (!og) { st.warnings.push('senza immagine (og:image): ' + url); return; }
-        if (!dates.length) { pending.push({ url, og, title, html }); return; }
+        const ranges = li.cards.get(url);
+        if (!dates.length && !(ranges && ranges.length)) { pending.push({ url, og, title, html }); return; }
+        dates = finalDates(dates, ranges);
         const live = dates.filter(d => d >= from);
         if (!live.length) return;                                   // evento passato
         const image = new URL(og, BASE).href.split('?')[0] + IMG_PARAMS;
